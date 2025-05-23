@@ -1,216 +1,122 @@
-# import os
-# import sys
-# from datetime import datetime, timedelta
-# from binance.client import Client
-# import csv
-
-
-# # Go up one folder from /notebooks to project root
-# sys.path.append(os.path.abspath(".."))
-
-# from config.load_env import load_keys
-
-# keys = load_keys()
-# client = Client(api_key=keys['api_key'], api_secret=keys['secret_key'])
-
-# function to get yesterday's 3-minute candles
-# def fetch_yesterday_3min_klines(client, symbol):
-#     end_time = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-#     start_time = end_time - timedelta(days=1)
-
-#     klines = client.futures_klines(
-#         symbol=symbol,
-#         interval=Client.KLINE_INTERVAL_3MINUTE,
-#         start_str=start_time.strftime('%Y-%m-%d %H:%M:%S'),
-#         end_str=end_time.strftime('%Y-%m-%d %H:%M:%S')
-#     )
-#     return klines
-
-# # Step 4: Write klines to CSV
-# def save_klines_to_csv(symbol, klines):
-#     filename = f"{symbol}_3min_20_may.csv"
-#     headers = ['timestamp', 'close', 'volume']
-
-#     with open(filename, mode='w', newline='') as file:
-#         writer = csv.writer(file)
-#         writer.writerow(headers)
-
-#         for k in klines:
-#             timestamp = datetime.utcfromtimestamp(k[0] / 1000.0).strftime('%Y-%m-%d %H:%M:%S')
-#             close = k[4]
-#             volume = k[5]
-#             writer.writerow([timestamp, close, volume])
-
-#     print(f"Saved {len(klines)} rows to {filename}")
-
-# # Step 5: Run for all symbols
-# symbols = ['BTCUSDT', 'ETHUSDT', 'XRPUSDT']
-
-# for symbol in symbols:
-#     klines = fetch_yesterday_3min_klines(client, symbol)
-#     print(f"\n{symbol} - Total candles: {len(klines)}")
-#     for k in klines:
-#         ts = datetime.utcfromtimestamp(k[0] / 1000.0)
-#         print(f"{ts} | Close: {k[4]} Volume: {k[5]}")
-#     save_klines_to_csv(symbol, klines)
-
-#-----
-
 import os
 import sys
 import time
-from datetime import datetime, timedelta
-from binance.client import Client
 import csv
+from datetime import datetime, timedelta
+import pytz
+from binance.client import Client
 
+# Load API keys
 sys.path.append(os.path.abspath(".."))
 from config.load_env import load_keys
 
 keys = load_keys()
 client = Client(api_key=keys['api_key'], api_secret=keys['secret_key'])
 
-def fetch_3min_klines_paged(client, symbol, days=7):
+def align_to_3min(dt):
+    dt = dt.astimezone(pytz.utc) if dt.tzinfo else dt.replace(tzinfo=pytz.utc)
+    aligned_minute = (dt.minute // 3) * 3
+    return dt.replace(minute=aligned_minute, second=0, microsecond=0)
+
+def fetch_batch_range(client, symbol, start_time, end_time, limit=1500):
     interval = Client.KLINE_INTERVAL_3MINUTE
-    limit = 1500
-    end_time = datetime.utcnow()
-    start_time = end_time - timedelta(days=days)
-    
-    all_klines = []
+    start_ts = int(start_time.timestamp() * 1000)
+    end_ts = int(end_time.timestamp() * 1000)
+
+    klines = client.futures_klines(
+        symbol=symbol,
+        interval=interval,
+        startTime=start_ts,
+        endTime=end_ts,
+        limit=limit
+    )
+    return klines
+
+def fetch_7day_klines_in_3_batches(client, symbol):
+    total_hours = 7 * 24  # 168 hours
+    chunk_hours = 56  # 168 / 3 = 56 hours per batch
+
+    def align_to_3min(dt):
+        aligned_minute = (dt.minute // 3) * 3
+        return dt.replace(minute=aligned_minute, second=0, microsecond=0)
+
+    end_time = align_to_3min(datetime.now(pytz.utc))
+    start_time = end_time - timedelta(hours=total_hours)
+
+    batch_ranges = []
     current_start = start_time
+    for i in range(3):
+        if i < 2:
+            current_end = current_start + timedelta(hours=chunk_hours)
+        else:
+            current_end = end_time
 
-    while current_start < end_time:
-        # Convert to string format for API
-        start_str = current_start.strftime('%Y-%m-%d %H:%M:%S')
-        klines = client.futures_klines(
-            symbol=symbol,
-            interval=interval,
-            start_str=start_str,
-            limit=limit
-        )
+        if current_end > end_time:
+            current_end = end_time
+        if current_start >= current_end:
+            current_start = current_end - timedelta(minutes=3)
 
-        if not klines:
-            break
+        batch_ranges.append((current_start, current_end))
+        current_start = current_end
 
-        all_klines.extend(klines)
+    print("Batch Time Ranges (UTC):")
+    for i, (s, e) in enumerate(batch_ranges):
+        print(f"  Batch {i+1}: {s.strftime('%Y-%m-%d %H:%M')} to {e.strftime('%Y-%m-%d %H:%M')} "
+              f"(Duration: {(e-s).total_seconds()/3600:.2f} hours)")
 
-        # Advance to the next start time based on last candle timestamp
-        last_kline_ts = klines[-1][0]  # milliseconds
-        current_start = datetime.utcfromtimestamp(last_kline_ts / 1000.0) + timedelta(minutes=3)
+    all_klines = []
+    for i, (start, end) in enumerate(batch_ranges):
+        print(f"Fetching batch {i+1}: {start.strftime('%m-%d %H:%M')} to {end.strftime('%m-%d %H:%M')}")
+        try:
+            batch = fetch_batch_range(client, symbol, start, end)
+            print(f"  Fetched {len(batch)} candles (Expected: {(end - start).total_seconds() / 180:.0f})")
+            all_klines.extend(batch)
+        except Exception as e:
+            print(f"  Request failed: {str(e)}")
+        time.sleep(0.3)
 
-        time.sleep(0.2)  # respect API rate limits
+    if not all_klines:
+        return []
 
-    return all_klines
+    all_klines.sort(key=lambda x: x[0])
+    start_timestamp = int(start_time.timestamp() * 1000)
+    final_data = [k for k in all_klines if k[0] >= start_timestamp]
 
-def save_klines_to_csv(symbol, klines, days):
+    seen = set()
+    unique_data = []
+    for k in final_data:
+        if k[0] not in seen:
+            seen.add(k[0])
+            unique_data.append(k)
+
+    final_data = unique_data[-3360:]
+
+    if final_data:
+        first = datetime.utcfromtimestamp(final_data[0][0] / 1000)
+        last = datetime.utcfromtimestamp(final_data[-1][0] / 1000)
+        print(f"Final Data Range: {first.strftime('%Y-%m-%d %H:%M')} to {last.strftime('%Y-%m-%d %H:%M')}")
+
+    return final_data
+
+def save_merged_to_csv(symbol, merged_klines, days):
     filename = f"{symbol}_3min_{days}days.csv"
-    headers = ['timestamp', 'close', 'volume']
+    headers = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
 
-    with open(filename, mode='w', newline='') as file:
-        writer = csv.writer(file)
+    with open(filename, 'w', newline='') as f:
+        writer = csv.writer(f)
         writer.writerow(headers)
-
-        for k in klines:
+        for k in merged_klines:
             timestamp = datetime.utcfromtimestamp(k[0] / 1000.0).strftime('%Y-%m-%d %H:%M:%S')
-            close = k[4]
-            volume = k[5]
-            writer.writerow([timestamp, close, volume])
+            writer.writerow([timestamp, k[1], k[2], k[3], k[4], k[5]])
 
-    print(f" Saved {len(klines)} rows to {filename}")
+    print(f"Saved {len(merged_klines)} rows to {filename}")
 
-# Run for all symbols
+# Run for each symbol
 symbols = ['BTCUSDT', 'ETHUSDT', 'XRPUSDT']
 days = 7
 
 for symbol in symbols:
-    klines = fetch_3min_klines_paged(client, symbol, days)
-    print(f"\n{symbol} - Total candles: {len(klines)}")
-    for k in klines[:5]:  # preview first 5 rows
-        ts = datetime.utcfromtimestamp(k[0] / 1000.0)
-        print(f"{ts} | Close: {k[4]} Volume: {k[5]}")
-    save_klines_to_csv(symbol, klines, days)
-
-#---
-
-# import os
-# import sys
-# import time
-# import argparse
-# from datetime import datetime, timedelta
-# from binance.client import Client
-# import csv
-
-# # Go up one folder from /notebooks to project root
-# sys.path.append(os.path.abspath(".."))
-# from config.load_env import load_keys
-# keys = load_keys()
-# client = Client(api_key=keys['api_key'], api_secret=keys['secret_key'])
-
-# def fetch_3min_klines_paged(client, symbol, days=7):
-#     interval = Client.KLINE_INTERVAL_3MINUTE
-#     limit = 1500
-#     end_time = datetime.utcnow()
-#     start_time = end_time - timedelta(days=days)
-
-#     all_klines = []
-#     current_start = start_time
-
-#     while current_start < end_time:
-#         start_str = current_start.strftime('%Y-%m-%d %H:%M:%S')
-#         klines = client.futures_klines(
-#             symbol=symbol,
-#             interval=interval,
-#             start_str=start_str,
-#             limit=limit
-#         )
-
-#         if not klines:
-#             break
-
-#         all_klines.extend(klines)
-#         last_kline_ts = klines[-1][0]
-#         current_start = datetime.utcfromtimestamp(last_kline_ts / 1000.0) + timedelta(minutes=3)
-
-#         time.sleep(0.2)  # Avoid hitting rate limit
-
-#     return all_klines
-
-# def save_klines_to_csv(symbol, klines, days):
-#     filename = f"{symbol}_3min_{days}days.csv"
-#     headers = ['timestamp', 'close', 'volume']
-
-#     with open(filename, mode='w', newline='') as file:
-#         writer = csv.writer(file)
-#         writer.writerow(headers)
-
-#         for k in klines:
-#             timestamp = datetime.utcfromtimestamp(k[0] / 1000.0).strftime('%Y-%m-%d %H:%M:%S')
-#             close = k[4]
-#             volume = k[5]
-#             writer.writerow([timestamp, close, volume])
-
-#     print(f"\n Saved {len(klines)} rows to {filename}")
-
-# def main():
-#     parser = argparse.ArgumentParser(description="Fetch historical 3-minute Kline data for a given symbol")
-#     parser.add_argument('--symbol', type=str, required=True, help='Trading pair symbol, e.g. BTCUSDT')
-#     parser.add_argument('--days', type=int, default=7, help='Number of past days to fetch (default: 7)')
-
-#     args = parser.parse_args()
-#     symbol = args.symbol.upper()
-#     days = args.days
-
-#     keys = load_keys()
-#     client = Client(api_key=keys['api_key'], api_secret=keys['secret_key'])
-
-#     print(f"\n Fetching {days} days of 3m data for {symbol}...")
-#     klines = fetch_3min_klines_paged(client, symbol, days)
-
-#     print(f" {symbol} - Total candles fetched: {len(klines)}")
-#     for k in klines[:5]:  # Preview first 5 rows
-#         ts = datetime.utcfromtimestamp(k[0] / 1000.0)
-#         print(f"{ts} | Close: {k[4]} Volume: {k[5]}")
-
-#     save_klines_to_csv(symbol, klines, days)
-
-# if __name__ == "__main__":
-#     main()
+    print(f"\nFetching 7 days of data for {symbol}...")
+    klines = fetch_7day_klines_in_3_batches(client, symbol)
+    print(f"{symbol}: Total merged candles = {len(klines)}")
+    save_merged_to_csv(symbol, klines, days)
