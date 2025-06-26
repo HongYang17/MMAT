@@ -421,7 +421,7 @@ def plot_feature_importance(model, feature_names, top_n=20):
 
 if __name__ == "__main__":
     # 1. 加载数据
-    data_path = 'BTCUSDT_1min_2024-05-01_to_2025-06-01.csv'
+    data_path = 'BTCUSDT_1min_2024-05-01_to_now.csv'
     print(f"正在加载数据: {data_path}")
     df = pd.read_csv(data_path)
 
