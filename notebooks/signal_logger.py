@@ -2,86 +2,56 @@ import pandas as pd
 import os
 
 class SignalHistoryLogger:
-    """
-    A class to log and manage trading signals in a CSV file.
-
-    Attributes:
-        filename (str): Path to the CSV file for storing signals.
-        df (pd.DataFrame): In-memory DataFrame holding signals with columns:
-            - timestamp: Signal timestamp (Asia/Singapore timezone).
-            - type: Signal type ('bullish' or 'bearish').
-            - price: Close price at the signal time.
-            - trigger: Conditions that triggered the signal (e.g., 'BullishEngulfing + MA5>MA20').
-    """
-
     def __init__(self, filename='signal_history.csv'):
-        """
-        Initialize the logger with a CSV file.
-
-        If the file exists, it is loaded into memory. Otherwise, an empty DataFrame
-        is created with the required columns.
-
-        Args:
-            filename (str): Path to the CSV file (default: 'signal_history.csv').
-        """
         self.filename = filename
         if os.path.exists(self.filename):
             self.df = pd.read_csv(self.filename, parse_dates=['timestamp'])
         else:
             self.df = pd.DataFrame(columns=['timestamp', 'type', 'price', 'trigger'])
 
-    def add_signal(self, signal_type, timestamp, price, trigger=''):
-        """
-        Add a new signal to the logger and save to CSV.
+    def add_signal(self, signal_type, timestamp, price, trigger=None):
+        # 如果已经有该时间戳的该类型信号，则先删除（防止重复）
+        self.df = self.df[~((self.df['timestamp'] == timestamp) & (self.df['type'] == signal_type))]
 
-        Appends the signal to the in-memory DataFrame and immediately writes to the
-        CSV file to ensure real-time persistence. Used in `generate_combined_signals`
-        when a confirmed signal (bullish_combined=1 or bearish_combined=-1) is detected.
-
-        Args:
-            signal_type (str): Type of signal ('bullish' or 'bearish').
-            timestamp (pd.Timestamp): Timestamp of the signal (Asia/Singapore).
-            price (float): Close price at the signal time.
-            trigger (str): Conditions that triggered the signal (default: '').
-        """
-        new_row = pd.DataFrame([{
+        # 添加新信号
+        new_row = {
             'timestamp': timestamp,
             'type': signal_type,
             'price': price,
             'trigger': trigger
-        }])
+        }
+        self.df = pd.concat([self.df, pd.DataFrame([new_row])], ignore_index=True)
+
+    def remove_by_timestamp(self, timestamp):
+        """移除所有该时间戳的记录（无论方向）"""
+        self.df = self.df[self.df['timestamp'] != timestamp]
+
+    def has_signal(self, timestamp, signal_type):
+        """检查是否已有该时间戳的该类型信号"""
         if self.df.empty:
-            self.df = new_row
-        else:
-            self.df = pd.concat([self.df, new_row], ignore_index=True)
-        # Save to CSV immediately for real-time persistence
-        self.df.to_csv(self.filename, index=False)
+            return False
+        return not self.df[
+            (self.df['timestamp'] == timestamp) & (self.df['type'] == signal_type)
+        ].empty
 
     def get_history(self):
-        """
-        Retrieve the signal history from the CSV file.
-
-        Used in `plot_realtime_signals` to load historical signals for plotting.
-        Only signals within the chart's time range (e.g., last 50 candles) are
-        plotted after filtering by timestamp.
-
-        Returns:
-            pd.DataFrame: DataFrame with columns ['timestamp', 'type', 'price', 'trigger'].
-                         Returns an empty DataFrame if the file doesn’t exist.
-        """
-        if os.path.exists(self.filename):
-            return pd.read_csv(self.filename, parse_dates=['timestamp'])
-        return pd.DataFrame(columns=['timestamp', 'type', 'price', 'trigger'])
+        return self.df.copy()
 
     def save_to_csv(self, filename=None):
-        """
-        Save the in-memory signal data to a CSV file.
+        path = filename if filename else self.filename
+        self.df.to_csv(path, index=False)
 
-        If filename is provided, saves to the specified path; otherwise, uses the
-        default filename.
+    def remove_by_type_and_timestamp(self, signal_type, timestamp):
+        """移除指定类型和时间戳的信号"""
+        self.df = self.df[~((self.df['timestamp'] == timestamp) & (self.df['type'] == signal_type))]
 
-        Args:
-            filename (str, optional): Path to save the CSV file.
-        """
-        filename = filename or self.filename
-        self.df.to_csv(filename, index=False)
+    def remove_opposite_signal(self, timestamp, signal_type):
+        """根据信号类型自动删除相反方向信号"""
+        opposite = {
+            'xgboost_bullish': 'xgboost_bearish',
+            'xgboost_bearish': 'xgboost_bullish'
+        }
+        if signal_type in opposite:
+            self.remove_by_type_and_timestamp(opposite[signal_type], timestamp)
+
+
